@@ -56,7 +56,7 @@ func main() {
 	}
 
 	log.Printf("Computing hashes for commit %s", config.CommitSha)
-	
+
 	// Process the commit to get query results with computed hashes
 	queryResults, cleanup, err := pkg.LoadIncompleteMetadata(config.Context, commitRev, config.Targets)
 	defer cleanup()
@@ -74,7 +74,7 @@ func main() {
 		log.Fatalf("Failed to persist hashes: %v", err)
 	}
 
-	log.Printf("Successfully persisted hashes for %d targets to %s", 
+	log.Printf("Successfully persisted hashes for %d targets to %s",
 		len(queryResults.MatchingTargets.Labels()), config.OutputFile)
 }
 

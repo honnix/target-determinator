@@ -60,10 +60,10 @@ func PersistHashes(filePath string, gitCommitSha string, queryResults *QueryResu
 	}
 
 	persistedData := PersistedHashData{
-		GitCommitSha:  gitCommitSha,
-		Timestamp:     time.Now(),
-		BazelRelease:  queryResults.BazelRelease,
-		TargetHashes:  targetHashes,
+		GitCommitSha: gitCommitSha,
+		Timestamp:    time.Now(),
+		BazelRelease: queryResults.BazelRelease,
+		TargetHashes: targetHashes,
 		Metadata: HashMetadata{
 			TargetsPattern: targetsPattern,
 			WorkspacePath:  context.WorkspacePath,
