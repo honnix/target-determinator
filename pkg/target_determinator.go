@@ -143,7 +143,7 @@ type Context struct {
 // FullyProcess returns the before and after metadata maps, with fully filled caches.
 func FullyProcess(context *Context, revBefore LabelledGitRev, revAfter LabelledGitRev, targets TargetsList) (*QueryResults, *QueryResults, error) {
 	log.Printf("Processing %s", revBefore)
-	queryInfoBefore, err := fullyProcessRevision(context, revBefore, targets)
+	queryInfoBefore, completePrefillBefore, err := fullyProcessRevision(context, revBefore, targets)
 	if err != nil {
 		if queryInfoBefore == nil {
 			return nil, nil, err
@@ -158,9 +158,20 @@ func FullyProcess(context *Context, revBefore LabelledGitRev, revAfter LabelledG
 
 	// At this point, we assume that the working directory is back to its pristine state.
 	log.Printf("Processing %s", revAfter)
-	queryInfoAfter, err := fullyProcessRevision(context, revAfter, targets)
+	queryInfoAfter, completePrefillAfter, err := fullyProcessRevision(context, revAfter, targets)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// Wait for both prefill operations to complete
+	if completePrefillBefore != nil {
+		if err := completePrefillBefore(); err != nil {
+			return nil, nil, fmt.Errorf("failed to complete cache prefilling for %s: %w", revBefore, err)
+		}
+	}
+
+	if err := completePrefillAfter(); err != nil {
+		return nil, nil, fmt.Errorf("failed to complete cache prefilling for %s: %w", revAfter, err)
 	}
 
 	return queryInfoBefore, queryInfoAfter, nil
@@ -171,7 +182,7 @@ func FullyProcess(context *Context, revBefore LabelledGitRev, revAfter LabelledG
 // but that the user may want to use the results anyway, despite their query results being empty.
 // This may be useful when the "before" commit is broken for query, as it allows for running all
 // matching targets from the "after" query, despite the "before" being broken.
-func fullyProcessRevision(context *Context, rev LabelledGitRev, targets TargetsList) (queryInfo *QueryResults, err error) {
+func fullyProcessRevision(context *Context, rev LabelledGitRev, targets TargetsList) (queryInfo *QueryResults, completePrefill func() error, err error) {
 	defer func() {
 		innerErr := gitCheckout(context.WorkspacePath, context.OriginalRevision)
 		if innerErr != nil && err == nil {
@@ -181,14 +192,21 @@ func fullyProcessRevision(context *Context, rev LabelledGitRev, targets TargetsL
 	queryInfo, loadMetadataCleanup, err := LoadIncompleteMetadata(context, rev, targets)
 	defer loadMetadataCleanup()
 	if err != nil {
-		return queryInfo, fmt.Errorf("failed to load metadata at %s: %w", rev, err)
+		return queryInfo, nil, fmt.Errorf("failed to load metadata at %s: %w", rev, err)
 	}
 
-	log.Println("Hashing targets")
-	if err := queryInfo.PrefillCache(); err != nil {
-		return nil, fmt.Errorf("failed to calculate hashes at %s: %w", rev, err)
+	// Start prefill cache operation in a goroutine
+	prefillDone := make(chan error, 1)
+	go func() {
+		log.Println("Hashing targets")
+		prefillDone <- queryInfo.PrefillCache()
+	}()
+
+	completePrefill = func() error {
+		return <-prefillDone
 	}
-	return queryInfo, nil
+
+	return queryInfo, completePrefill, nil
 }
 
 // LoadIncompleteMetadata loads the metadata about, but not hashes of, targets into a QueryResults.
