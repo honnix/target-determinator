@@ -737,15 +737,40 @@ func doQueryDeps(context *Context, targets TargetsList) (*QueryResults, error) {
 		}, retErr
 	}
 
-	transitiveConfiguredTargets, err := ParseCqueryResult(transitiveResult, &normalizer)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse cquery result: %w", err)
+	type parseResult struct {
+		transitiveConfiguredTargets map[label.Label]map[Configuration]*analysis.ConfiguredTarget
+		err                         error
 	}
 
-	matchingTargetResults, err := runToCqueryResult(context, targets.String(), false)
-	if err != nil {
-		return nil, fmt.Errorf("failed to run top-level cquery: %w", err)
+	type cqueryResult struct {
+		matchingTargetResults *analysis.CqueryResult
+		err                   error
 	}
+
+	parseResultCh := make(chan parseResult, 1)
+	cqueryResultCh := make(chan cqueryResult, 1)
+
+	go func() {
+		transitiveConfiguredTargets, err := ParseCqueryResult(transitiveResult, &normalizer)
+		parseResultCh <- parseResult{transitiveConfiguredTargets, err}
+	}()
+
+	go func() {
+		matchingTargetResults, err := runToCqueryResult(context, targets.String(), false)
+		cqueryResultCh <- cqueryResult{matchingTargetResults, err}
+	}()
+
+	parseRes := <-parseResultCh
+	if parseRes.err != nil {
+		return nil, fmt.Errorf("failed to parse cquery result: %w", parseRes.err)
+	}
+	transitiveConfiguredTargets := parseRes.transitiveConfiguredTargets
+
+	cqueryRes := <-cqueryResultCh
+	if cqueryRes.err != nil {
+		return nil, fmt.Errorf("failed to run top-level cquery: %w", cqueryRes.err)
+	}
+	matchingTargetResults := cqueryRes.matchingTargetResults
 
 	var compatibleTargets map[label.Label]bool
 	if context.FilterIncompatibleTargets {
