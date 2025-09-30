@@ -737,7 +737,9 @@ func doQueryDeps(context *Context, targets TargetsList) (*QueryResults, error) {
 		}, retErr
 	}
 
+	log.Println("ParseCqueryResult 1")
 	transitiveConfiguredTargets, err := ParseCqueryResult(transitiveResult, &normalizer)
+	log.Println("ParseCqueryResult 2")
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse cquery result: %w", err)
 	}
@@ -827,6 +829,7 @@ func runToCqueryResult(context *Context, pattern string, includeTransitions bool
 		BazelCmdConfig{Dir: context.WorkspacePath, Stdout: &stdout, Stderr: &stderr},
 		[]string{"--output_base", context.BazelOutputBase}, "cquery", args...)
 
+	log.Println(stderr.String())
 	if returnVal != 0 || err != nil {
 		return nil, fmt.Errorf("failed to run cquery on %s: %w. Stderr:\n%v", pattern, err, stderr.String())
 	}
