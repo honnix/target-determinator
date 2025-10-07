@@ -139,6 +139,8 @@ type HashComparisonSummary struct {
 	TotalRemoved int `json:"total_removed"`
 	// AffectedTargets is a sorted list of unique target labels that were affected
 	AffectedTargets []string `json:"affected_targets"`
+	// AffectedRemovedTargets is a set of target labels that were removed
+	AffectedRemovedTargetsSet map[string]bool `json:"affected_removed_targets_set"`
 }
 
 // CompareHashFiles compares two persisted hash files and returns the differences
@@ -155,6 +157,7 @@ func CompareHashFiles(beforeFile, afterFile string) (*HashComparisonResult, erro
 
 	var differences []HashDiff
 	affectedTargetsSet := make(map[string]bool)
+	affectedRemovedTargetsSet := make(map[string]bool)
 
 	// Check for changed and removed targets
 	for label, beforeConfigs := range beforeData.TargetHashes {
@@ -169,6 +172,7 @@ func CompareHashFiles(beforeFile, afterFile string) (*HashComparisonResult, erro
 					BeforeHash:    beforeHash,
 				})
 				affectedTargetsSet[label] = true
+				affectedRemovedTargetsSet[label] = true
 			}
 			continue
 		}
@@ -185,6 +189,7 @@ func CompareHashFiles(beforeFile, afterFile string) (*HashComparisonResult, erro
 					BeforeHash:    beforeHash,
 				})
 				affectedTargetsSet[label] = true
+				affectedRemovedTargetsSet[label] = true
 			} else if beforeHash != afterHash {
 				// Hash changed
 				differences = append(differences, HashDiff{
@@ -236,7 +241,8 @@ func CompareHashFiles(beforeFile, afterFile string) (*HashComparisonResult, erro
 
 	// Calculate summary statistics
 	summary := HashComparisonSummary{
-		AffectedTargets: affectedTargets,
+		AffectedTargets:           affectedTargets,
+		AffectedRemovedTargetsSet: affectedRemovedTargetsSet,
 	}
 	for _, diff := range differences {
 		switch diff.Status {
@@ -274,4 +280,9 @@ func (result *HashComparisonResult) GetAffectedTargetLabels() ([]gazelle_label.L
 	}
 
 	return labels, nil
+}
+
+// WasRemoved returns whether a target was Removed
+func (summary *HashComparisonSummary) WasRemoved(target string) bool {
+	return summary.AffectedRemovedTargetsSet[target]
 }
