@@ -178,91 +178,128 @@ func CompareHashFiles(beforeFile, afterFile string) (*HashComparisonResult, erro
 	beforeData := beforeResult.data
 	afterData := afterResult.data
 
-	var differences []HashDiff
-	affectedTargetsSet := make(map[string]bool)
+	// Compare hashes in parallel
+	type diffResult struct {
+		differences        []HashDiff
+		affectedTargetsSet map[string]bool
+	}
 
-	// Check for changed and removed targets
-	for label, beforeConfigs := range beforeData.TargetHashes {
-		afterConfigs, exists := afterData.TargetHashes[label]
-		if !exists {
-			// Target was removed entirely
+	// Channel for results from checking changed/removed targets and added configs
+	changedRemovedCh := make(chan diffResult, 1)
+	go func() {
+		var diffs []HashDiff
+		affected := make(map[string]bool)
+
+		// Check for changed and removed targets
+		for label, beforeConfigs := range beforeData.TargetHashes {
+			afterConfigs, exists := afterData.TargetHashes[label]
+			if !exists {
+				// Target was removed entirely
+				for config, beforeHash := range beforeConfigs {
+					diffs = append(diffs, HashDiff{
+						Label:         label,
+						Configuration: config,
+						Status:        "removed",
+						BeforeHash:    beforeHash,
+					})
+					affected[label] = true
+				}
+				continue
+			}
+
+			// Check each configuration of the target
 			for config, beforeHash := range beforeConfigs {
-				differences = append(differences, HashDiff{
-					Label:         label,
-					Configuration: config,
-					Status:        "removed",
-					BeforeHash:    beforeHash,
-				})
-				affectedTargetsSet[label] = true
+				afterHash, configExists := afterConfigs[config]
+				if !configExists {
+					// Configuration was removed
+					diffs = append(diffs, HashDiff{
+						Label:         label,
+						Configuration: config,
+						Status:        "removed",
+						BeforeHash:    beforeHash,
+					})
+					affected[label] = true
+				} else if beforeHash != afterHash {
+					// Hash changed
+					diffs = append(diffs, HashDiff{
+						Label:         label,
+						Configuration: config,
+						Status:        "changed",
+						BeforeHash:    beforeHash,
+						AfterHash:     afterHash,
+					})
+					affected[label] = true
+				}
 			}
-			continue
-		}
 
-		// Check each configuration of the target
-		for config, beforeHash := range beforeConfigs {
-			afterHash, configExists := afterConfigs[config]
-			if !configExists {
-				// Configuration was removed
-				differences = append(differences, HashDiff{
-					Label:         label,
-					Configuration: config,
-					Status:        "removed",
-					BeforeHash:    beforeHash,
-				})
-				affectedTargetsSet[label] = true
-			} else if beforeHash != afterHash {
-				// Hash changed
-				differences = append(differences, HashDiff{
-					Label:         label,
-					Configuration: config,
-					Status:        "changed",
-					BeforeHash:    beforeHash,
-					AfterHash:     afterHash,
-				})
-				affectedTargetsSet[label] = true
-			}
-		}
-
-		// Check for added configurations in existing targets
-		for config, afterHash := range afterConfigs {
-			if _, configExists := beforeConfigs[config]; !configExists {
-				differences = append(differences, HashDiff{
-					Label:         label,
-					Configuration: config,
-					Status:        "added",
-					AfterHash:     afterHash,
-				})
-				affectedTargetsSet[label] = true
-			}
-		}
-	}
-
-	// Check for entirely new targets
-	for label, afterConfigs := range afterData.TargetHashes {
-		if _, exists := beforeData.TargetHashes[label]; !exists {
+			// Check for added configurations in existing targets
 			for config, afterHash := range afterConfigs {
-				differences = append(differences, HashDiff{
-					Label:         label,
-					Configuration: config,
-					Status:        "added",
-					AfterHash:     afterHash,
-				})
-				affectedTargetsSet[label] = true
+				if _, configExists := beforeConfigs[config]; !configExists {
+					diffs = append(diffs, HashDiff{
+						Label:         label,
+						Configuration: config,
+						Status:        "added",
+						AfterHash:     afterHash,
+					})
+					affected[label] = true
+				}
 			}
 		}
-	}
 
-	// Convert affected targets set to sorted slice
-	var affectedTargets []string
-	for label := range affectedTargetsSet {
-		affectedTargets = append(affectedTargets, label)
-	}
-	sort.Strings(affectedTargets)
+		changedRemovedCh <- diffResult{diffs, affected}
+	}()
 
+	// Channel for results from checking entirely new targets
+	newTargetsCh := make(chan diffResult, 1)
+	go func() {
+		var diffs []HashDiff
+		affected := make(map[string]bool)
+
+		// Check for entirely new targets
+		for label, afterConfigs := range afterData.TargetHashes {
+			if _, exists := beforeData.TargetHashes[label]; !exists {
+				for config, afterHash := range afterConfigs {
+					diffs = append(diffs, HashDiff{
+						Label:         label,
+						Configuration: config,
+						Status:        "added",
+						AfterHash:     afterHash,
+					})
+					affected[label] = true
+				}
+			}
+		}
+
+		newTargetsCh <- diffResult{diffs, affected}
+	}()
+
+	// Build afterTargetsSet while waiting for goroutines
 	afterTargetsSet := make(map[string]bool, len(afterData.TargetHashes))
 	for label := range afterData.TargetHashes {
 		afterTargetsSet[label] = true
 	}
+
+	// Collect results from both goroutines
+	changedRemovedResult := <-changedRemovedCh
+	newTargetsResult := <-newTargetsCh
+
+	// Merge differences
+	differences := make([]HashDiff, 0, len(changedRemovedResult.differences)+len(newTargetsResult.differences))
+	differences = append(differences, changedRemovedResult.differences...)
+	differences = append(differences, newTargetsResult.differences...)
+
+	// Merge affected targets sets
+	affectedTargetsSet := changedRemovedResult.affectedTargetsSet
+	for label := range newTargetsResult.affectedTargetsSet {
+		affectedTargetsSet[label] = true
+	}
+
+	// Convert affected targets set to sorted slice
+	affectedTargets := make([]string, 0, len(affectedTargetsSet))
+	for label := range affectedTargetsSet {
+		affectedTargets = append(affectedTargets, label)
+	}
+	sort.Strings(affectedTargets)
 
 	// Calculate summary statistics
 	summary := HashComparisonSummary{
