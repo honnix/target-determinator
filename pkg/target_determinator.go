@@ -738,10 +738,28 @@ func doQueryDeps(context *Context, targets TargetsList) (*QueryResults, error) {
 		}, retErr
 	}
 
-	transitiveConfiguredTargets, err := ParseCqueryResult(transitiveResult, &normalizer)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse cquery result: %w", err)
+	// Parse transitive result in background while we run the matching targets query
+	type parseResult struct {
+		transitiveConfiguredTargets map[label.Label]map[Configuration]*analysis.ConfiguredTarget
+		err                         error
 	}
+	parseResultCh := make(chan parseResult, 1)
+	go func() {
+		log.Println("Parsing transitive result")
+		transitiveConfiguredTargets, err := ParseCqueryResult(transitiveResult, &normalizer)
+		parseResultCh <- parseResult{transitiveConfiguredTargets, err}
+	}()
+
+	// Get configuration details in background - this is independent of query results
+	type configResult struct {
+		configurations map[Configuration]singleConfigurationOutput
+		err            error
+	}
+	configResultCh := make(chan configResult, 1)
+	go func() {
+		configurations, err := getConfigurationDetails(context)
+		configResultCh <- configResult{configurations, err}
+	}()
 
 	matchingTargetResults, err := runToCqueryResult(context, targets.String(), false, bazelRelease)
 	if err != nil {
@@ -788,10 +806,18 @@ func doQueryDeps(context *Context, targets TargetsList) (*QueryResults, error) {
 		labelsToConfigurations: processedLabelsToConfigurations,
 	}
 
-	configurations, err := getConfigurationDetails(context)
-	if err != nil {
-		return nil, fmt.Errorf("failed to interpret configurations output: %w", err)
+	// Wait for background goroutines to complete
+	parseRes := <-parseResultCh
+	if parseRes.err != nil {
+		return nil, fmt.Errorf("failed to parse cquery result: %w", parseRes.err)
 	}
+	transitiveConfiguredTargets := parseRes.transitiveConfiguredTargets
+
+	configRes := <-configResultCh
+	if configRes.err != nil {
+		return nil, fmt.Errorf("failed to interpret configurations output: %w", configRes.err)
+	}
+	configurations := configRes.configurations
 
 	queryResults := &QueryResults{
 		MatchingTargets:             matchingTargets,
