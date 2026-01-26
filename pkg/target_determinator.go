@@ -996,22 +996,71 @@ func runToLines(workingDirectory string, arg0 string, args ...string) ([]string,
 }
 
 func ParseCqueryResult(targets []*analysis.ConfiguredTarget, n *Normalizer) (map[label.Label]map[Configuration]*analysis.ConfiguredTarget, error) {
+	if len(targets) == 0 {
+		return make(map[label.Label]map[Configuration]*analysis.ConfiguredTarget), nil
+	}
+
+	// Use worker pool for parallel processing
+	numWorkers := runtime.NumCPU()
+	if numWorkers > len(targets) {
+		numWorkers = len(targets)
+	}
+
+	type processedTarget struct {
+		label         label.Label
+		configuration Configuration
+		target        *analysis.ConfiguredTarget
+		err           error
+	}
+
+	targetsChan := make(chan *analysis.ConfiguredTarget, numWorkers)
+	resultsChan := make(chan processedTarget, numWorkers)
+
+	// Start workers
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for target := range targetsChan {
+				l, err := labelOf(target.GetTarget(), n)
+				if err != nil {
+					resultsChan <- processedTarget{err: err}
+					continue
+				}
+
+				NormalizeConfiguredTarget(target, n)
+
+				resultsChan <- processedTarget{
+					label:         l,
+					configuration: NormalizeConfiguration(target.GetConfiguration().GetChecksum()),
+					target:        target,
+				}
+			}
+		}()
+	}
+
+	// Send targets to workers in a goroutine
+	go func() {
+		for _, target := range targets {
+			targetsChan <- target
+		}
+		close(targetsChan)
+		wg.Wait()
+		close(resultsChan)
+	}()
+
+	// Collect results
 	configuredTargets := make(map[label.Label]map[Configuration]*analysis.ConfiguredTarget, len(targets))
-
-	for _, target := range targets {
-		l, err := labelOf(target.GetTarget(), n)
-		if err != nil {
-			return nil, err
+	for result := range resultsChan {
+		if result.err != nil {
+			return nil, result.err
 		}
 
-		_, ok := configuredTargets[l]
-		if !ok {
-			configuredTargets[l] = make(map[Configuration]*analysis.ConfiguredTarget)
+		if _, ok := configuredTargets[result.label]; !ok {
+			configuredTargets[result.label] = make(map[Configuration]*analysis.ConfiguredTarget)
 		}
-
-		NormalizeConfiguredTarget(target, n)
-
-		configuredTargets[l][NormalizeConfiguration(target.GetConfiguration().GetChecksum())] = target
+		configuredTargets[result.label][result.configuration] = result.target
 	}
 
 	return configuredTargets, nil
