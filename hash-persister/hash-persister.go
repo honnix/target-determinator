@@ -147,6 +147,7 @@ func resolveConfig(flags hashPersisterFlags) (*config, error) {
 		CompareQueriesAroundAnalysisCacheClear: flags.commonFlags.CompareQueriesAroundAnalysisCacheClear,
 		FilterIncompatibleTargets:              flags.commonFlags.FilterIncompatibleTargets,
 		EnforceCleanRepo:                       flags.commonFlags.EnforceCleanRepo == cli.EnforceClean,
+		QueryBackend:                           *flags.commonFlags.QueryBackend,
 	}
 
 	targetsList, err := pkg.ParseTargetsList(*flags.commonFlags.TargetsFlag)

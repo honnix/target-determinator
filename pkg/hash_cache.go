@@ -25,12 +25,18 @@ import (
 )
 
 // NewTargetHashCache creates a TargetHashCache which uses context for metadata lookups.
+// When forceDisableConfiguredRuleInputs is true, ConfiguredRuleInput will not be used regardless
+// of Bazel version. This is needed for the query backend which doesn't populate ConfiguredRuleInput.
 func NewTargetHashCache(
 	context map[gazelle_label.Label]map[Configuration]*analysis.ConfiguredTarget,
 	normalizer *Normalizer,
 	bazelRelease string,
+	forceDisableConfiguredRuleInputs bool,
 ) *TargetHashCache {
 	bazelVersionSupportsConfiguredRuleInputs := isConfiguredRuleInputsSupported(bazelRelease)
+	if forceDisableConfiguredRuleInputs {
+		bazelVersionSupportsConfiguredRuleInputs = false
+	}
 
 	return &TargetHashCache{
 		context: context,
