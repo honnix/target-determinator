@@ -944,29 +944,46 @@ func runToCqueryResult(context *Context, pattern string, includeTransitions bool
 
 func runToQueryResult(context *Context, pattern string) ([]*analysis.ConfiguredTarget, error) {
 	log.Printf("Running query on %s", pattern)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
 
-	// Unlike cquery (which only gained streamed_proto in Bazel 8.2), bazel query has supported
-	// streamed_proto since well before any Bazel version this tool targets, so always use it.
+	queryOutputFile, err := os.CreateTemp("", "target-determinator-query-*.proto")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temporary file for query output: %w", err)
+	}
+	queryOutput := queryOutputFile.Name()
+	defer os.Remove(queryOutput)
+	if err = queryOutputFile.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close temporary file for query output: %w", err)
+	}
+
+	var stderr bytes.Buffer
+	// Unlike cquery (which only gained streamed_proto and output_file in Bazel 8.2),
+	// bazel query has supported both since well before any Bazel version this tool targets.
 	returnVal, err := context.BazelCmd.Execute(
-		BazelCmdConfig{Dir: context.WorkspacePath, Stdout: &stdout, Stderr: &stderr},
+		BazelCmdConfig{Dir: context.WorkspacePath, Stderr: &stderr},
 		[]string{"--output_base", context.BazelOutputBase},
-		"query", "--output=streamed_proto", "--order_output=no", pattern)
+		"query", "--output=streamed_proto", "--order_output=no",
+		"--output_file="+queryOutput, pattern)
 
 	if returnVal != 0 || err != nil {
 		return nil, fmt.Errorf("failed to run query on %s: %w. Stderr:\n%v", pattern, err, stderr.String())
 	}
 
+	queryOutputFile, err = os.Open(queryOutput)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open query output file %s for reading: %w", queryOutput, err)
+	}
+	defer queryOutputFile.Close()
+
 	// Wrap each build.Target in an analysis.ConfiguredTarget with nil configuration.
 	var targets []*analysis.ConfiguredTarget
+	reader := bufio.NewReader(queryOutputFile)
 	unmarshalOpts := protodelim.UnmarshalOptions{MaxSize: -1}
 	for {
 		var target build.Target
-		if err = unmarshalOpts.UnmarshalFrom(&stdout, &target); err == io.EOF {
+		if err = unmarshalOpts.UnmarshalFrom(reader, &target); err == io.EOF {
 			break
 		} else if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal streamed query stdout: %w", err)
+			return nil, fmt.Errorf("failed to unmarshal streamed query output: %w", err)
 		}
 		targets = append(targets, &analysis.ConfiguredTarget{
 			Target:        &target,
