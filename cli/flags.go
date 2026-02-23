@@ -150,6 +150,11 @@ func ValidateCommonFlags(commandName string, flags *CommonFlags) (targetPattern 
 
 func ResolveCommonConfig(commonFlags *CommonFlags, beforeRevStr string) (*CommonConfig, error) {
 
+	// Flag validation
+	if *commonFlags.QueryBackend == "query" && *commonFlags.AnalysisCacheClearStrategy != "skip" {
+		return nil, fmt.Errorf("--analysis-cache-clear-strategy=%s is incompatible with --query-backend=query: bazel query does not use the analysis cache", *commonFlags.AnalysisCacheClearStrategy)
+	}
+
 	// Context attributes
 
 	workingDirectory, err := filepath.Abs(*commonFlags.WorkingDirectory)
