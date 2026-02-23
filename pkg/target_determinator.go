@@ -949,25 +949,29 @@ func runToQueryResult(context *Context, pattern string) ([]*analysis.ConfiguredT
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
+	// Unlike cquery (which only gained streamed_proto in Bazel 8.2), bazel query has supported
+	// streamed_proto since well before any Bazel version this tool targets, so always use it.
 	returnVal, err := context.BazelCmd.Execute(
 		BazelCmdConfig{Dir: context.WorkspacePath, Stdout: &stdout, Stderr: &stderr},
 		[]string{"--output_base", context.BazelOutputBase},
-		"query", "--output=proto", pattern)
+		"query", "--output=streamed_proto", pattern)
 
 	if returnVal != 0 || err != nil {
 		return nil, fmt.Errorf("failed to run query on %s: %w. Stderr:\n%v", pattern, err, stderr.String())
 	}
 
-	var result build.QueryResult
-	if err = proto.Unmarshal(stdout.Bytes(), &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal query stdout: %w", err)
-	}
-
 	// Wrap each build.Target in an analysis.ConfiguredTarget with nil configuration.
-	targets := make([]*analysis.ConfiguredTarget, 0, len(result.GetTarget()))
-	for _, target := range result.GetTarget() {
+	var targets []*analysis.ConfiguredTarget
+	unmarshalOpts := protodelim.UnmarshalOptions{MaxSize: -1}
+	for {
+		var target build.Target
+		if err = unmarshalOpts.UnmarshalFrom(&stdout, &target); err == io.EOF {
+			break
+		} else if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal streamed query stdout: %w", err)
+		}
 		targets = append(targets, &analysis.ConfiguredTarget{
-			Target:        target,
+			Target:        &target,
 			Configuration: nil,
 		})
 	}
