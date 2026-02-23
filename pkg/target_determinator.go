@@ -952,7 +952,7 @@ func runToQueryResult(context *Context, pattern string) ([]*analysis.ConfiguredT
 	returnVal, err := context.BazelCmd.Execute(
 		BazelCmdConfig{Dir: context.WorkspacePath, Stdout: &stdout, Stderr: &stderr},
 		[]string{"--output_base", context.BazelOutputBase},
-		"query", "--output=streamed_proto", pattern)
+		"query", "--output=streamed_proto", "--order_output=no", pattern)
 
 	if returnVal != 0 || err != nil {
 		return nil, fmt.Errorf("failed to run query on %s: %w. Stderr:\n%v", pattern, err, stderr.String())
@@ -984,7 +984,7 @@ func runToQueryLabels(context *Context, pattern string, normalizer *Normalizer) 
 	returnVal, err := context.BazelCmd.Execute(
 		BazelCmdConfig{Dir: context.WorkspacePath, Stdout: &stdout, Stderr: &stderr},
 		[]string{"--output_base", context.BazelOutputBase},
-		"query", "--output=label", pattern)
+		"query", "--output=label", "--order_output=no", pattern)
 
 	if returnVal != 0 || err != nil {
 		return nil, fmt.Errorf("failed to run query on %s: %w. Stderr:\n%v", pattern, err, stderr.String())
