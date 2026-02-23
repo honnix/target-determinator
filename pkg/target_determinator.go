@@ -845,7 +845,9 @@ func doQueryDepsQueryMode(context *Context, targets TargetsList, normalizer *Nor
 		return nil, fmt.Errorf("failed to parse query result: %w", err)
 	}
 
-	matchingTargetResults, err := runToQueryResult(context, targets.String())
+	// Use --output=label for matching targets since we only need label names here.
+	// The full proto data is already available in the transitive deps result above.
+	matchingLabels, err := runToQueryLabels(context, targets.String(), normalizer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to run top-level query: %w", err)
 	}
@@ -853,13 +855,9 @@ func doQueryDepsQueryMode(context *Context, targets TargetsList, normalizer *Nor
 	// In query mode, there are no configurations — use a single empty configuration for all targets.
 	emptyConfiguration := NormalizeConfiguration("")
 	log.Println("Matching labels to configurations")
-	labels := make([]label.Label, 0)
+	labels := make([]label.Label, 0, len(matchingLabels))
 	labelsToConfigurations := make(map[label.Label][]Configuration)
-	for _, mt := range matchingTargetResults {
-		l, err := labelOf(mt.Target, normalizer)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse label returned from query %s: %w", mt.Target, err)
-		}
+	for _, l := range matchingLabels {
 		labels = append(labels, l)
 		labelsToConfigurations[l] = append(labelsToConfigurations[l], emptyConfiguration)
 	}
@@ -976,6 +974,36 @@ func runToQueryResult(context *Context, pattern string) ([]*analysis.ConfiguredT
 		})
 	}
 	return targets, nil
+}
+
+func runToQueryLabels(context *Context, pattern string, normalizer *Normalizer) ([]label.Label, error) {
+	log.Printf("Running query (labels) on %s", pattern)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	returnVal, err := context.BazelCmd.Execute(
+		BazelCmdConfig{Dir: context.WorkspacePath, Stdout: &stdout, Stderr: &stderr},
+		[]string{"--output_base", context.BazelOutputBase},
+		"query", "--output=label", pattern)
+
+	if returnVal != 0 || err != nil {
+		return nil, fmt.Errorf("failed to run query on %s: %w. Stderr:\n%v", pattern, err, stderr.String())
+	}
+
+	var labels []label.Label
+	scanner := bufio.NewScanner(&stdout)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		l, err := normalizer.ParseCanonicalLabel(line)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse label from query output %q: %w", line, err)
+		}
+		labels = append(labels, l)
+	}
+	return labels, nil
 }
 
 func findCompatibleTargets(context *Context, pattern string, compatibility bool, n *Normalizer, bazelRelease string) (map[label.Label]bool, error) {
