@@ -524,7 +524,15 @@ func hashRule(thc *TargetHashCache, rule *build.Rule, configuration *analysis.Co
 	// rather than hashing attributes ourselves.
 	// On the plus side, this builds in some heuristics from Bazel (e.g. ignoring `generator_location`).
 	// On the down side, it would even further decouple our "hashing" and "diffing" procedures.
-	for _, attr := range rule.GetAttribute() {
+	//
+	// Sort attributes by name before hashing to ensure deterministic output regardless of the
+	// order Bazel returns them in the proto output, which can vary between invocations.
+	sortedAttributes := make([]*build.Attribute, len(rule.GetAttribute()))
+	copy(sortedAttributes, rule.GetAttribute())
+	sort.Slice(sortedAttributes, func(i, j int) bool {
+		return sortedAttributes[i].GetName() < sortedAttributes[j].GetName()
+	})
+	for _, attr := range sortedAttributes {
 		normalizedAttribute := thc.AttributeForSerialization(attr)
 
 		protoBytes, err := proto.Marshal(normalizedAttribute)
@@ -542,6 +550,11 @@ func hashRule(thc *TargetHashCache, rule *build.Rule, configuration *analysis.Co
 	if err != nil {
 		return nil, err
 	}
+	// Sort rule inputs by label to ensure deterministic output regardless of the order Bazel
+	// returns them in the proto output, which can vary between invocations.
+	sort.Slice(labelsAndConfigurations, func(i, j int) bool {
+		return labelsAndConfigurations[i].Label.String() < labelsAndConfigurations[j].Label.String()
+	})
 	for _, ruleInputLabelAndConfigurations := range labelsAndConfigurations {
 		for _, ruleInputConfiguration := range ruleInputLabelAndConfigurations.Configurations {
 			ruleInputLabel := ruleInputLabelAndConfigurations.Label
