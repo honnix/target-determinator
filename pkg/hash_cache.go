@@ -40,13 +40,10 @@ func NewTargetHashCache(
 
 	return &TargetHashCache{
 		context: context,
-		fileHashCache: &fileHashCache{
-			cache: make(map[string]*cacheEntry),
-		},
+		fileHashCache: &fileHashCache{},
 		normalizer:                               normalizer,
 		bazelRelease:                             bazelRelease,
 		bazelVersionSupportsConfiguredRuleInputs: bazelVersionSupportsConfiguredRuleInputs,
-		cache:                                    make(map[gazelle_label.Label]map[Configuration]*cacheEntry),
 		frozen:                                   false,
 	}
 }
@@ -78,8 +75,7 @@ type TargetHashCache struct {
 
 	frozen bool
 
-	cacheLock sync.Mutex
-	cache     map[gazelle_label.Label]map[Configuration]*cacheEntry
+	cache sync.Map // LabelAndConfiguration -> *cacheEntry
 }
 
 var labelNotFound = fmt.Errorf("label not found in context")
@@ -103,25 +99,13 @@ var notComputedBeforeFrozen = fmt.Errorf("TargetHashCache has already been froze
 //     mixed into the hash, even if only one of the configurations is actually relevant.
 //     See https://github.com/bazelbuild/bazel/issues/14610
 func (thc *TargetHashCache) Hash(labelAndConfiguration LabelAndConfiguration) ([]byte, error) {
-	thc.cacheLock.Lock()
-	_, ok := thc.cache[labelAndConfiguration.Label]
-	if !ok {
-		if thc.frozen {
-			thc.cacheLock.Unlock()
-			return nil, fmt.Errorf("didn't have cache entry for label %s: %w", labelAndConfiguration.Label, notComputedBeforeFrozen)
+	if val, ok := thc.cache.Load(labelAndConfiguration); ok {
+		entry := val.(*cacheEntry)
+		entry.hashLock.Lock()
+		defer entry.hashLock.Unlock()
+		if entry.hash != nil {
+			return entry.hash, nil
 		}
-		thc.cache[labelAndConfiguration.Label] = make(map[Configuration]*cacheEntry)
-	}
-	entry, ok := thc.cache[labelAndConfiguration.Label][labelAndConfiguration.Configuration]
-	if !ok {
-		newEntry := &cacheEntry{}
-		thc.cache[labelAndConfiguration.Label][labelAndConfiguration.Configuration] = newEntry
-		entry = newEntry
-	}
-	thc.cacheLock.Unlock()
-	entry.hashLock.Lock()
-	defer entry.hashLock.Unlock()
-	if entry.hash == nil {
 		if thc.frozen {
 			return nil, fmt.Errorf("didn't have cache value for label %s in configuration %s: %w", labelAndConfiguration.Label, labelAndConfiguration.Configuration, notComputedBeforeFrozen)
 		}
@@ -130,7 +114,26 @@ func (thc *TargetHashCache) Hash(labelAndConfiguration LabelAndConfiguration) ([
 			return nil, err
 		}
 		entry.hash = hash
+		return entry.hash, nil
 	}
+
+	if thc.frozen {
+		return nil, fmt.Errorf("didn't have cache entry for label %s: %w", labelAndConfiguration.Label, notComputedBeforeFrozen)
+	}
+
+	newEntry := &cacheEntry{}
+	actual, _ := thc.cache.LoadOrStore(labelAndConfiguration, newEntry)
+	entry := actual.(*cacheEntry)
+	entry.hashLock.Lock()
+	defer entry.hashLock.Unlock()
+	if entry.hash != nil {
+		return entry.hash, nil
+	}
+	hash, err := hashTarget(thc, labelAndConfiguration)
+	if err != nil {
+		return nil, err
+	}
+	entry.hash = hash
 	return entry.hash, nil
 }
 
@@ -668,8 +671,7 @@ func getConfiguredRuleInputs(thc *TargetHashCache, rule *build.Rule, ownConfigur
 }
 
 type fileHashCache struct {
-	cacheLock sync.Mutex
-	cache     map[string]*cacheEntry
+	cache sync.Map // string -> *cacheEntry
 }
 
 type cacheEntry struct {
@@ -679,48 +681,59 @@ type cacheEntry struct {
 
 // Hash computes the digest of the contents of a file at the given path, and caches the result.
 func (hc *fileHashCache) Hash(path string) ([]byte, error) {
-	hc.cacheLock.Lock()
-	entry, ok := hc.cache[path]
-	if !ok {
-		newEntry := &cacheEntry{}
-		hc.cache[path] = newEntry
-		entry = newEntry
+	if val, ok := hc.cache.Load(path); ok {
+		entry := val.(*cacheEntry)
+		entry.hashLock.Lock()
+		defer entry.hashLock.Unlock()
+		if entry.hash != nil {
+			return entry.hash, nil
+		}
+		return hc.computeFileHash(entry, path)
 	}
-	hc.cacheLock.Unlock()
+
+	newEntry := &cacheEntry{}
+	actual, _ := hc.cache.LoadOrStore(path, newEntry)
+	entry := actual.(*cacheEntry)
 	entry.hashLock.Lock()
 	defer entry.hashLock.Unlock()
-	if entry.hash == nil {
-		file, err := os.Open(path)
-		if err != nil {
-			return nil, err
-		}
-		defer file.Close()
-		hasher := sha256.New()
-
-		// Hash the file mode.
-		// This is used to detect change such as file exec bit changing.
-		info, err := file.Stat()
-		if err != nil {
-			return nil, err
-		}
-
-		// Only record the user permissions, and only the execute bit:
-		// - group and others permissions differences don't affect the build and are not tracked by git. This means that
-		//   a file created as 0775 by a script and then added to git might show up as 0755 when performing a
-		//  `git clone` or a `git checkout`. This can cause issues when TD uses a git worktree for the `before` case.
-		// - bazel and git don't care if a file is writeable, and the hashing below will fail if the file isn't readable
-		//   anyway.
-		userExecPerm := getUserExecuteBit(info.Mode())
-		if _, err := fmt.Fprintf(hasher, userExecPerm.String()); err != nil {
-			return nil, err
-		}
-
-		// Hash the content of the file
-		if _, err := io.Copy(hasher, file); err != nil {
-			return nil, err
-		}
-		entry.hash = hasher.Sum(nil)
+	if entry.hash != nil {
+		return entry.hash, nil
 	}
+	return hc.computeFileHash(entry, path)
+}
+
+func (hc *fileHashCache) computeFileHash(entry *cacheEntry, path string) ([]byte, error) {
+	// Caller must hold entry.hashLock.
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	hasher := sha256.New()
+
+	// Hash the file mode.
+	// This is used to detect change such as file exec bit changing.
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	// Only record the user permissions, and only the execute bit:
+	// - group and others permissions differences don't affect the build and are not tracked by git. This means that
+	//   a file created as 0775 by a script and then added to git might show up as 0755 when performing a
+	//  `git clone` or a `git checkout`. This can cause issues when TD uses a git worktree for the `before` case.
+	// - bazel and git don't care if a file is writeable, and the hashing below will fail if the file isn't readable
+	//   anyway.
+	userExecPerm := getUserExecuteBit(info.Mode())
+	if _, err := fmt.Fprintf(hasher, userExecPerm.String()); err != nil {
+		return nil, err
+	}
+
+	// Hash the content of the file
+	if _, err := io.Copy(hasher, file); err != nil {
+		return nil, err
+	}
+	entry.hash = hasher.Sum(nil)
 	return entry.hash, nil
 }
 
